@@ -754,12 +754,26 @@ NAT(Thread_nativeCreate)
     s->thread = a[0].l;
     dvm_field *pf = s->thread ? thread_peer(s->thread) : NULL;
     if (pf) dvm_slots(s->thread)[pf->slot].j = (int64_t)(uintptr_t)s->thread;     /* alive from here (before it runs: start() then isAlive() is true) */
-    pthread_attr_t at; pthread_attr_init(&at);
-    pthread_attr_setstacksize(&at, 32u << 20);
-    pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+    /* 32 MB of stack per thread, as before; an app that keeps many threads (GameHub: coroutines, OkHttp, ExoPlayer, Firebase) ran out of
+     * room for that many 32 MB stacks and every later start threw OutOfMemoryError. Only then smaller stacks are tried. */
+    static const size_t sizes[] = { 32u << 20, 8u << 20, 2u << 20 };
     pthread_t th;
-    if (pthread_create(&th, &at, thread_main, s) != 0) { free(s); return dvm_throw("java/lang/OutOfMemoryError", "pthread_create"); }
-    return true;
+    int err = 0, first_err = 0;
+    for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+        pthread_attr_t at; pthread_attr_init(&at);
+        pthread_attr_setstacksize(&at, sizes[i]);
+        pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
+        err = pthread_create(&th, &at, thread_main, s);
+        pthread_attr_destroy(&at);
+        if (err == 0) {
+            if (i) { static int noted; if (noted++ < 8) tl_log_line("dvm: a thread started with a %zu MB stack (32 MB failed: %s)", sizes[i] >> 20, strerror(first_err)); }
+            return true;
+        }
+        if (!first_err) first_err = err;
+        static int failed; if (failed++ < 8) tl_log_line("dvm: pthread_create with a %zu MB stack failed: %s", sizes[i] >> 20, strerror(err));
+    }
+    free(s);
+    return dvm_throw("java/lang/OutOfMemoryError", "pthread_create");
 }
 
 /* ================================================================== Throwable */
