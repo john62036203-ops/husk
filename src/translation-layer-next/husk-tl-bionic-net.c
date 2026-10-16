@@ -91,7 +91,11 @@ static socklen_t sa_to_darwin(const void *g, socklen_t glen, struct sockaddr_sto
         if (abstract || strlen(path) > sizeof(s->sun_path) - 1) {
             uint64_t h = 1469598103934665603ull;
             for (const char *q = path; *q; q++) h = (h ^ (uint8_t)*q) * 1099511628211ull;
-            const char *tmp = getenv("TMPDIR"); if (!tmp || !*tmp || strlen(tmp) > sizeof(s->sun_path) - 22) tmp = "/tmp";
+            /* an iOS app's TMPDIR (/private/var/mobile/Containers/Data/Application/<UUID>/tmp/) is 89 bytes, too long for the name;
+               /var is /private/var, so the same directory without "/private" fits, and /tmp is not writable from the sandbox */
+            const char *tmp = getenv("TMPDIR");
+            if (tmp && !strncmp(tmp, "/private/var/", 13)) tmp += 8;
+            if (!tmp || !*tmp || strlen(tmp) > sizeof(s->sun_path) - 22) tmp = "/tmp";
             char dir[600]; snprintf(dir, sizeof(dir), "%s%ss", tmp, tmp[strlen(tmp) - 1] == '/' ? "" : "/");
             mkdir(dir, 0700);
             snprintf(path, sizeof(path), "%s/%c%016llx", dir, abstract ? 'a' : 'p', (unsigned long long)h);
@@ -208,6 +212,7 @@ static int b_bind(int fd, const void *g, socklen_t glen)
         if (base && (base[1] == 'a' || base[1] == 'p') && strlen(base + 2) == 16 && base - sp >= 2 && !strncmp(base - 2, "/s", 2) && stat(sp, &st) == 0 && S_ISSOCK(st.st_mode)) unlink(sp);
     }
     TL_ERRNO_BEGIN(); int r = bind(fd, (struct sockaddr *)&s, n); int e = errno; TL_ERRNO_END();
+    if (r < 0 && s.ss_family == AF_UNIX) tl_log_line("net: bind of a local socket at %s failed: %s", ((struct sockaddr_un *)&s)->sun_path, strerror(e));
     NTRACE("bind(fd %d, family %d%s%s) -> %d errno %d", fd, s.ss_family, s.ss_family == AF_UNIX ? " " : "", s.ss_family == AF_UNIX ? ((struct sockaddr_un *)&s)->sun_path : "", r, r < 0 ? e : 0);
     return r;
 }
