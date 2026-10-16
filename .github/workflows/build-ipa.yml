@@ -1,0 +1,91 @@
+name: Build Husk IPA (app binary over the 2.0 release)
+
+# Rebuilds only Husk's own executable (the app and the translation layer) from
+# this branch, and puts it into the official Husk 2.0 IPA, whose QEMU, ANGLE,
+# MoltenVK, Java runtime and guest files it reuses. This branch is based on the
+# commit that release was built from (build 109), so those parts match.
+
+on:
+  push:
+    branches: [husk-2.0-socket-fix]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select the newest Xcode
+        run: |
+          NEWEST="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "using $NEWEST"
+          sudo xcode-select -s "$NEWEST/Contents/Developer"
+          xcodebuild -version
+
+      - name: Fetch the Husk 2.0 release IPA
+        run: |
+          curl -fL --retry 3 -o release.ipa https://github.com/Leviidev/Husk/releases/download/2.0/Husk.ipa
+          mkdir rel && (cd rel && unzip -q ../release.ipa)
+          REL_APP="$(ls -d rel/Payload/*.app)"
+          echo "REL_APP=$REL_APP" >> "$GITHUB_ENV"
+          /usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$REL_APP/Info.plist"
+          ls "$REL_APP/Frameworks"
+
+      - name: Stage the release's libraries where the project links them
+        run: |
+          mkdir -p build/ios-arm64/lib build/ios-arm64/sysroot/lib
+          cp "$REL_APP/Frameworks/libqemu-aarch64-softmmu.dylib" build/ios-arm64/lib/
+          cp "$REL_APP/Frameworks/libANGLE-shared.dylib" build/ios-arm64/sysroot/lib/
+          xcodebuild -create-xcframework -framework "$REL_APP/Frameworks/MoltenVK.framework" \
+              -output build/ios-arm64/lib/MoltenVK.xcframework
+
+      - name: Pairing library (Rust)
+        run: |
+          rustup target add aarch64-apple-ios
+          ./scripts/build_rppairing_ios.sh
+
+      - name: Placeholders for the resource step (the release's resources are kept)
+        run: |
+          mkdir -p guests/phase0 fakebin third_party/build/qemu-10.0.12-utm/pc-bios
+          touch guests/phase0/vmlinuz-virt guests/phase0/initramfs-virt
+          printf '' | bzip2 > third_party/build/qemu-10.0.12-utm/pc-bios/edk2-aarch64-code.fd.bz2
+          printf '#!/bin/sh\nf=""; for a; do case "$a" in *.fd|*.qcow2) f="$a";; esac; done\n: > "$f"\n' > fakebin/qemu-img
+          chmod +x fakebin/qemu-img
+          echo "$PWD/fakebin" >> "$GITHUB_PATH"
+
+      - name: Build the app
+        run: |
+          brew install xcodegen || true
+          (cd src/app && xcodegen generate --quiet) || echo "xcodegen failed; using the checked-in project"
+          set -o pipefail
+          xcodebuild -project src/app/Husk.xcodeproj -scheme Husk \
+              -sdk iphoneos -configuration Release -derivedDataPath dd \
+              CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+              build 2>&1 | tee build.log | grep -E "error:|warning: build/|BUILD (SUCCEEDED|FAILED)" || true
+          grep -q "BUILD SUCCEEDED" build.log || { grep -E "error:" build.log | head -40; exit 1; }
+
+      - name: Put the new executable into the release app and sign ad hoc
+        run: |
+          APP=dd/Build/Products/Release-iphoneos/Husk.app
+          EXE="$(/usr/libexec/PlistBuddy -c "Print CFBundleExecutable" "$REL_APP/Info.plist")"
+          cp "$APP/$EXE" "$REL_APP/$EXE"
+          plutil -replace HuskBuildCommit -string "$(git rev-parse --short HEAD)-socketfix" "$REL_APP/Info.plist"
+          codesign --force --sign - --timestamp=none --entitlements src/app/Husk/Husk.entitlements "$REL_APP"
+          codesign -d --entitlements - "$REL_APP" | head -20
+          (cd rel && zip -qry ../Husk-socketfix.ipa Payload)
+          ls -l Husk-socketfix.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Husk-socketfix
+          path: Husk-socketfix.ipa
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
