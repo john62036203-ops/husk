@@ -26,11 +26,11 @@ jobs:
           xcodebuild -version
           swift --version
 
-      - name: StikJIT's interface for a Swift older than 6.4 (module selectors written as dots)
+      - name: StikJIT's interface for a Swift older than 6.4 (module selectors dropped)
         run: |
           if swift --version 2>&1 | grep -qE "Swift version 6\.([4-9]|[1-9][0-9])"; then echo "Swift 6.4+; interface kept"; exit 0; fi
           find src/app/Frameworks/StikJIT.xcframework -name "*.swiftinterface" -print0 | \
-              xargs -0 perl -pi -e 's/\bStikJIT::StikJIT\.StikJIT::/StikJIT.StikJIT./g; s/\b([A-Za-z_][A-Za-z0-9_]*)::/$1./g'
+              xargs -0 perl -pi -e 's/\b[A-Za-z_][A-Za-z0-9_]*::(?=[A-Za-z_`])//g'
 
       - name: Fetch the Husk 2.0 release IPA
         run: |
